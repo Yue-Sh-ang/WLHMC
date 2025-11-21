@@ -72,6 +72,10 @@ def cal_loss(net, datax):
     eps = 1e-12
     return -(y * torch.log(y_hat + eps)).sum()
 
+def ln_loss(net, datax):
+    loss=cal_loss(net, datax)
+    return torch.log(loss)
+
 def accuracy(net, datax):
     y_hat = net(datax.x.T.float())
     preds = y_hat.argmax(dim=1)
@@ -89,25 +93,24 @@ boundary = torch.cat([bound.view(-1) for bound in boundary]).to(device)
 
 
 # entropy map,no bias
-bin_begin=-20
-bin_end=20
-bin_width=0.02
+bin_begin=-15
+bin_end=15
+bin_width=0.05
 margin=0
 bin_num = int((bin_end-bin_begin)/bin_width+2*margin+2)
 entropy = torch.zeros((bin_num, bin_num),device=device)
 
-entropymap=WLHMC_utils.EntropyMap(bin_begin, bin_end, bin_width, margin, device)
+entropymap=WLHMC_utils.EntropyMap(entropy,bin_begin,bin_end,bin_begin,bin_end)
 
-#Establish the sampler
-sampler=WLHMC_utils.WHMC_Sampler(net, entropymap, cal_loss,datax,datay, device,boundary)
+sampler=WLHMC_utils.Sampler_WLHMC(net, entropymap, ln_loss,ln_loss,datax,datay, device,boundary)
 
 
 def choose_Scalefactor(epoch):
     global scale_factor
-    maxWLFactor=10
+    maxWLFactor=1
     warmupStep=1000
     global ExploreStep
-    ExploreStep=20000
+    ExploreStep=50000
     
     if epoch < warmupStep:
             scale_factor = maxWLFactor / warmupStep * epoch
@@ -119,11 +122,34 @@ def choose_Scalefactor(epoch):
     return scale_factor
 
 
-for i in range(40000):
-    choose_Scalefactor(i)
-    sampler.sample(scale_factor,lr0=0.01,L=10)
-    if i%100==0:
-        print('step:',i,'train loss:',sampler.y.cpu().detach().numpy(),'val loss:',sampler.x.cpu().detach().numpy())
-    if i%5000==0:
-        torch.save(sampler.net.state_dict(),'./net{}.pth'.format(i))
-        np.save('./entropymap{}.npy'.format(i),sampler.entropymap.entropy.cpu().detach().numpy())
+Tprint=1000
+Tsave=50000
+acc=0
+logfile = "sample_log.txt"
+with open(logfile, "a") as f:
+     for i in range(1_000_001):  # run 1 million steps
+        choose_Scalefactor(i)
+        accept = sampler.sample(scale_factor, lr0=0.0005, L=20, digit=4)
+        if accept:
+            acc += 1
+        
+        if i % Tprint == 0:
+            acc_rate = acc / Tprint
+            acc = 0  # reset counter
+
+            train_loss = sampler.y.cpu().item()
+            val_loss = sampler.x.cpu().item()
+
+            msg = (
+                f"step: {i}, "
+                f"train loss: {train_loss:.6f}, "
+                f"val loss: {val_loss:.6f}, "
+                f"acc: {acc_rate:.4f}\n"
+            )
+            f.write(msg)
+            f.flush()  # important if job crashes
+            print(msg, end="")
+        if i % Tsave == 0:
+            torch.save(net.state_dict(), f"net_{i}.pth")
+            sampler.entropymap.save(f"entropy_{i}.npz")
+

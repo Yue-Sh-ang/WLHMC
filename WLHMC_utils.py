@@ -99,7 +99,8 @@ class EntropyMap():
         return dSdx,dSdy
     
     def plot(self,vmin=None,vmax=None):
-        S_masked = np.ma.masked_where(self.entropy <= 0, self.entropy) #only show positive entropy
+        Entropy=self.entropy.detach().cpu().numpy()
+        S_masked = np.ma.masked_where(Entropy <= 0, Entropy) #only show positive entropy
         fig, ax = plt.subplots(1,1)
         im = ax.imshow(S_masked, origin='lower', extent=(self.x_min, self.x_max, self.y_min, self.y_max), aspect='auto', vmin=vmin, vmax=vmax)
         fig.colorbar(im, ax=ax, label='Entropy')
@@ -110,7 +111,7 @@ class EntropyMap():
         """Save all class attributes to an .npz file."""
         np.savez(
             filename,
-            entropy=self.entropy,
+            entropy=self.entropy.detach().cpu().numpy(),
             x_min=self.x_min,
             x_max=self.x_max,
             y_min=self.y_min,
