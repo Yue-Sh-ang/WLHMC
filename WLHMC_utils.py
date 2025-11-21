@@ -2,11 +2,29 @@ import torch
 import random
 import copy
 import numpy as np
+import matplotlib.pyplot as plt
 
 
 class EntropyMap():
-    '''Entropy map class, store the biased entropy map and provide methods to get and update entropy and get its gradient'''
-    # a logspace entropy picture
+    '''Entropy map class, store the biased entropy map and provide methods to get and update entropy and get its gradient
+    Attributes
+    ----------
+    entropy: 2D tensor, entropy values on the grid
+    xnum,ynum: number of bins in x and y direction
+    x_min,x_max,y_min,y_max: range of the entropy map
+    x_width,y_width: width of each bin in x and y direction
+    Methods
+    -------
+    get_entropy(x,y): get entropy value at (x,y)
+    update_entropy(x,y,dS): update entropy value at (x,y) by dS
+    get_entropy_grad(x,y,Bound,Push): get entropy gradient at (x,y)
+        Bound: if True, smooth very big gradient
+        Push: if True, if gradient is zero, push it to a random direction
+    plot(vmin,vmax): plot the entropy map
+    save(filename): save the entropy map to a .npz file
+    load(filename): load the entropy map from a .npz file  
+    '''
+    # a linear entropy picture
     def __init__(self,Sinit,x_min,x_max,y_min,y_max):
         self.entropy=Sinit
         self.xnum=Sinit.shape[0]
@@ -33,14 +51,15 @@ class EntropyMap():
         self.entropy[x_bin,y_bin]+=dS
 
     def get_entropy_grad(self,x,y,Bound=True,Push=True):
+        # Use a 6-point stencil for gradient calculation
+
         if x<self.x_min or x>self.x_max or y<self.y_min or y>self.y_max:
             return 0,0
         x_bin=int((x-self.x_min)/self.x_width)
         y_bin=int((y-self.y_min)/self.y_width)
         
-        # Use a 6-point stencil for gradient calculation
-        def safe_get(i, j):
-        # Make sure indices are within bounds to avoid IndexError
+        
+        def safe_get(i, j): # Make sure indices are within bounds to avoid IndexError
             if 0 <= i < self.xnum and 0 <= j < self.ynum:
                 return self.entropy[i, j]
             else:
@@ -70,7 +89,7 @@ class EntropyMap():
         
         if Bound: #smooth very big gradient
             dSdx = 100/(1+torch.exp(-dSdx/25))-50
-            dSdy = 100/(1 + torch.exp(-dSdy/25))-50
+            dSdy = 100/(1+torch.exp(-dSdy/25))-50
         if Push: #if there is no gradient, push it to a random direction
             if dSdx==0:
                 dSdx=random.uniform(-5, 5)
@@ -78,6 +97,38 @@ class EntropyMap():
                 dSdy=random.uniform(-5, 5)
 
         return dSdx,dSdy
+    
+    def plot(self,vmin=None,vmax=None):
+        S_masked = np.ma.masked_where(self.entropy <= 0, self.entropy) #only show positive entropy
+        fig, ax = plt.subplots(1,1)
+        im = ax.imshow(S_masked, origin='lower', extent=(self.x_min, self.x_max, self.y_min, self.y_max), aspect='auto', vmin=vmin, vmax=vmax)
+        fig.colorbar(im, ax=ax, label='Entropy')
+        ax.set_title('Entropy Map')
+        return fig,ax
+    
+    def save(self, filename):
+        """Save all class attributes to an .npz file."""
+        np.savez(
+            filename,
+            entropy=self.entropy,
+            x_min=self.x_min,
+            x_max=self.x_max,
+            y_min=self.y_min,
+            y_max=self.y_max
+            )
+    @classmethod
+    def load(cls, filename):
+        """Load class attributes from an .npz file and create an instance."""
+        data = np.load(filename)
+        instance = cls(
+            Sinit=data['entropy'],
+            x_min=data['x_min'].item(),
+            x_max=data['x_max'].item(),
+            y_min=data['y_min'].item(),
+            y_max=data['y_max'].item()
+        )
+        return instance
+        
 
 #this shold be add: initial the entropy gradient and smooth very big gradient
 class Sampler_WLHMC():
@@ -87,15 +138,16 @@ class Sampler_WLHMC():
 	----------
     net: neural network to be sampled
     entropymap: biased entropy map
-    cal_loss: loss function
-    datax,datay: data for E1 and E2
+    fx,fy: functions to calculate x values and y values for entropy map
+    datax,datay: data to be used in fx,fy
     
     Methods
     -------
-    sample(dS,L,lr0): perform one WLHMC sampling step, and update entropy map
+    sample(dS,L,lr0,digit): perform one WLHMC sampling step, and update entropy map
         dS: entropy update step
         L: number of MD steps
         lr0: base learning rate for MD steps
+        digit: if not None, snap parameters to this digit after MD steps
     return: True if accepted, False if rejected
     
     Attributes
@@ -104,12 +156,13 @@ class Sampler_WLHMC():
     entropymap: current entropy map
 
     '''
-    def __init__(self, net, entropymap,cal_loss,datax,datay,device,boundary=None):
+    def __init__(self, net, entropymap,fx,fy,datax,datay,device,boundary=None):
         self.device=device
         self.net = net 
         self.net0 = copy.deepcopy(net.state_dict()) # if reject, return to net0
         self.boundary = boundary
-        self.cal_loss=cal_loss
+        self.fx=fx
+        self.fy=fy
         self.datax=datax
         self.datay=datay
 
@@ -134,23 +187,22 @@ class Sampler_WLHMC():
     
     def _cal_acceleration(self):
         entropymap=self.entropymap
-        loss_train = self.cal_loss(self.net,self.datax)
-        ln_loss_train =torch.log(loss_train)
-        loss_val = self.cal_loss(self.net,self.datay)
-        ln_loss_val=torch.log(loss_val)
-        X_grad, Y_grad = entropymap.get_entropy_grad(ln_loss_train,ln_loss_val)
+        xval = self.fx(self.net,self.datax)
+        yval = self.fy(self.net,self.datay)
+        
+        X_grad, Y_grad = entropymap.get_entropy_grad(xval,yval)
         self.net.zero_grad()
-        ln_loss_train.backward()
+        xval.backward()
         with torch.no_grad():
             E1_q_tensor= torch.cat([param.grad.view(-1) for param in self.net.parameters() if param.grad is not None])
         self.net.zero_grad()
-        ln_loss_val.backward()
+        yval.backward()
         with torch.no_grad():
             E2_q_tensor=torch.cat([param.grad.view(-1) for param in self.net.parameters() if param.grad is not None])
 
         acc_tensor = -X_grad*E1_q_tensor
         acc_tensor += -Y_grad*E2_q_tensor
-        return acc_tensor,ln_loss_train,ln_loss_val
+        return acc_tensor, xval, yval
 
     def _cal_H(self):
         K_total = []
@@ -203,14 +255,23 @@ class Sampler_WLHMC():
                 self.p[i].copy_(velocity_tensor[offset:offset + vel_length].view(vel.shape))
                 offset += vel_length
 
-    def sample(self,dS,L=10,lr0=1e-3):
+    def sample(self,dS,L=20,lr0=1e-4,digit=None):
         pi=self._generate_RandomMomentum()
         self.p=pi
         self.Hi=self._cal_H()
         for _ in range(L):
             lr = lr0 * random.uniform(0.8, 1.2)
             self._move_MD(lr)
+        #Hf_origin = self._cal_H()
+        if digit is not None: 
+            step = 10 ** (-digit)
+
+            with torch.no_grad():
+                for name, param in self.net.named_parameters():
+                    snapped = torch.round(param / step) * step
+                    param.copy_(snapped)
         Hf = self._cal_H()
+        
         if np.random.rand() < np.exp(self.Hi - Hf):
             # accept
             self.net0 = copy.deepcopy(self.net.state_dict())

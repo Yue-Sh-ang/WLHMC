@@ -75,7 +75,7 @@ def cal_loss(net, datax):
 def accuracy(net, datax):
     y_hat = net(datax.x.T.float())
     preds = y_hat.argmax(dim=1)
-    true_classes = datax.y.argmax(dim=1)
+    true_classes = datax.y.argmax(dim=0)
     return (preds == true_classes).float().mean().item()
 
 # Boundary
@@ -96,10 +96,10 @@ margin=0
 bin_num = int((bin_end-bin_begin)/bin_width+2*margin+2)
 entropy = torch.zeros((bin_num, bin_num),device=device)
 
-entropymap=WHMC_utils.EntropyMap(bin_begin, bin_end, bin_width, margin, device)
+entropymap=WLHMC_utils.EntropyMap(bin_begin, bin_end, bin_width, margin, device)
 
 #Establish the sampler
-sampler=WHMC_utils.WHMC_Sampler(net, entropymap, cal_loss,datax,datay, device,boundary)
+sampler=WLHMC_utils.WHMC_Sampler(net, entropymap, cal_loss,datax,datay, device,boundary)
 
 
 def choose_Scalefactor(epoch):
